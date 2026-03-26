@@ -20,6 +20,9 @@ import {
   where, 
   orderBy, 
   addDoc,
+  deleteDoc,
+  writeBatch,
+  getDocs,
   serverTimestamp,
   getDocFromServer
 } from 'firebase/firestore';
@@ -53,10 +56,15 @@ import {
   Users, 
   AlertCircle,
   Loader2,
-  Camera
+  Camera,
+  FileJson,
+  FileText,
+  ChevronDown
 } from 'lucide-react';
 import { cn } from './lib/utils';
 import { format } from 'date-fns';
+import jsPDF from 'jspdf';
+import html2canvas from 'html2canvas';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -65,7 +73,13 @@ export default function App() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  const [showPrivacyModal, setShowPrivacyModal] = useState(false);
+  const [showConfirmDelete, setShowConfirmDelete] = useState(false);
+  const [appError, setAppError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const passportRef = useRef<HTMLDivElement>(null);
 
   // Auth Listener
   useEffect(() => {
@@ -128,8 +142,16 @@ export default function App() {
   }, [transactions, user]);
 
   const handleLogin = async () => {
-    const provider = new GoogleAuthProvider();
-    await signInWithPopup(auth, provider);
+    setAppError(null);
+    try {
+      const provider = new GoogleAuthProvider();
+      // Add custom parameters to force account selection if needed
+      provider.setCustomParameters({ prompt: 'select_account' });
+      await signInWithPopup(auth, provider);
+    } catch (error: any) {
+      console.error("Login Error:", error);
+      setAppError(error.message || "Failed to sign in. Please check if popups are blocked.");
+    }
   };
 
   const handleLogout = () => signOut(auth);
@@ -155,6 +177,111 @@ export default function App() {
     reader.readAsDataURL(file);
   };
 
+  const handleExportJSON = () => {
+    if (!user) return;
+    const passport = {
+      profile,
+      score,
+      recentTransactions: transactions.slice(0, 10),
+      timestamp: new Date().toISOString(),
+      verificationId: Math.random().toString(36).substring(7).toUpperCase()
+    };
+    const blob = new Blob([JSON.stringify(passport, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `CrediSense_Passport_${user.uid.substring(0, 6)}.json`;
+    a.click();
+    setShowExportMenu(false);
+  };
+
+  const handleExportPDF = async () => {
+    if (!passportRef.current || !user) return;
+    setIsExporting(true);
+    setShowExportMenu(false);
+
+    try {
+      // Use a more reliable way to show the element for capture
+      const element = passportRef.current;
+      element.style.display = 'block';
+      element.style.position = 'fixed';
+      element.style.top = '0';
+      element.style.left = '0';
+      element.style.zIndex = '-1';
+
+      // Wait a bit for layout
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      const canvas = await html2canvas(element, {
+        scale: 2,
+        backgroundColor: '#E4E3E0',
+        logging: true,
+        useCORS: true,
+        allowTaint: true,
+        windowWidth: 800
+      });
+
+      element.style.display = 'none';
+      element.style.position = 'static';
+
+      const imgData = canvas.toDataURL('image/png');
+      const pdf = new jsPDF('p', 'mm', 'a4');
+      const pdfWidth = pdf.internal.pageSize.getWidth();
+      const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
+      
+      pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
+      pdf.save(`CrediSense_Passport_${user.uid.substring(0, 6)}.pdf`);
+    } catch (error) {
+      console.error('PDF Export failed', error);
+      setAppError('PDF Export failed. Please try again.');
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const handleDeleteAllData = async () => {
+    if (!user) return;
+
+    try {
+      setLoading(true);
+      console.log("Starting full data deletion for user:", user.uid);
+      
+      const batch = writeBatch(db);
+
+      // 1. Delete all transactions
+      const transQuery = query(collection(db, 'transactions'), where('uid', '==', user.uid));
+      const transSnap = await getDocs(transQuery);
+      console.log(`Found ${transSnap.size} transactions to delete`);
+      transSnap.forEach((doc) => {
+        batch.delete(doc.ref);
+      });
+
+      // 2. Delete score
+      const scoreRef = doc(db, 'scores', user.uid);
+      batch.delete(scoreRef);
+
+      // 3. Delete user profile
+      const userRef = doc(db, 'users', user.uid);
+      batch.delete(userRef);
+
+      // 4. Commit all deletions
+      await batch.commit();
+      console.log("Firestore data deletion committed successfully");
+      
+      // 5. Sign out
+      await signOut(auth);
+      // We'll use a local state to show success if needed, but signout will redirect to login
+      window.location.reload(); 
+    } catch (e: any) {
+      console.error("Deletion Error:", e);
+      setAppError("Failed to delete data. Please try again later.");
+    } finally {
+      setLoading(false);
+      setShowConfirmDelete(false);
+      setShowPrivacyModal(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-[#E4E3E0] flex items-center justify-center">
@@ -175,6 +302,12 @@ export default function App() {
             <p className="mb-8 text-lg leading-relaxed">
               Bridging the "missing middle" in East Africa. Turn your MoMo logs, Yaka! tokens, and trade ledgers into a Credit Passport.
             </p>
+            {appError && (
+              <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-700 text-xs font-mono flex items-center gap-2">
+                <AlertCircle className="w-4 h-4" />
+                {appError}
+              </div>
+            )}
             <button 
               onClick={handleLogin}
               className="w-full py-4 bg-[#141414] text-[#E4E3E0] font-bold uppercase tracking-widest hover:bg-opacity-90 transition-all flex items-center justify-center gap-2"
@@ -199,21 +332,38 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#E4E3E0] text-[#141414] font-sans selection:bg-[#141414] selection:text-[#E4E3E0]">
       {/* Header */}
-      <header className="border-b border-[#141414] p-4 flex justify-between items-center sticky top-0 bg-[#E4E3E0]/80 backdrop-blur-md z-50">
-        <div className="flex items-center gap-4">
-          <h1 className="text-2xl font-serif italic">CrediSense</h1>
-          <div className="h-4 w-[1px] bg-[#141414]/20" />
-          <span className="text-[10px] font-mono uppercase tracking-widest opacity-60">East Africa v1.0</span>
-        </div>
-        <div className="flex items-center gap-6">
-          <div className="text-right hidden sm:block">
-            <p className="text-[10px] font-mono uppercase opacity-40">Connected As</p>
-            <p className="text-xs font-bold">{profile?.displayName}</p>
+      <header className="border-b border-[#141414] p-4 sticky top-0 bg-[#E4E3E0]/80 backdrop-blur-md z-50">
+        <div className="flex justify-between items-center">
+          <div className="flex items-center gap-4">
+            <h1 className="text-2xl font-serif italic">CrediSense</h1>
+            <div className="h-4 w-[1px] bg-[#141414]/20" />
+            <span className="text-[10px] font-mono uppercase tracking-widest opacity-60">East Africa v1.0</span>
           </div>
-          <button onClick={handleLogout} className="p-2 hover:bg-[#141414] hover:text-[#E4E3E0] transition-colors rounded-full">
-            <LogOut className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-6">
+            <button 
+              onClick={() => setShowPrivacyModal(true)}
+              className="text-[10px] font-mono uppercase tracking-widest opacity-40 hover:opacity-100 transition-opacity"
+            >
+              Privacy & Data
+            </button>
+            <div className="text-right hidden sm:block">
+              <p className="text-[10px] font-mono uppercase opacity-40">Connected As</p>
+              <p className="text-xs font-bold">{profile?.displayName}</p>
+            </div>
+            <button onClick={handleLogout} className="p-2 hover:bg-[#141414] hover:text-[#E4E3E0] transition-colors rounded-full">
+              <LogOut className="w-5 h-5" />
+            </button>
+          </div>
         </div>
+        {appError && (
+          <div className="mt-4 p-3 bg-red-50 border border-red-200 text-red-700 text-xs font-mono flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4" />
+              {appError}
+            </div>
+            <button onClick={() => setAppError(null)} className="text-lg">&times;</button>
+          </div>
+        )}
       </header>
 
       <main className="max-w-7xl mx-auto p-4 sm:p-8 grid grid-cols-1 lg:grid-cols-12 gap-8">
@@ -393,32 +543,43 @@ export default function App() {
           </section>
 
           {/* Credit Passport Export */}
-          <section className="border border-[#141414] bg-[#141414] text-[#E4E3E0] p-6 space-y-4">
+          <section className="border border-[#141414] bg-[#141414] text-[#E4E3E0] p-6 space-y-4 relative">
             <h2 className="text-xs font-serif italic uppercase opacity-50">Credit Passport</h2>
             <p className="text-xs leading-relaxed opacity-80">
-              Generate a verified JSON passport to share with SACCOs or Fintech partners for loan applications.
+              Generate a verified passport to share with SACCOs or Fintech partners for loan applications.
             </p>
-            <button 
-              onClick={() => {
-                const passport = {
-                  profile,
-                  score,
-                  recentTransactions: transactions.slice(0, 10),
-                  timestamp: new Date().toISOString(),
-                  verificationId: Math.random().toString(36).substring(7).toUpperCase()
-                };
-                const blob = new Blob([JSON.stringify(passport, null, 2)], { type: 'application/json' });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = `CrediSense_Passport_${user.uid.substring(0, 6)}.json`;
-                a.click();
-              }}
-              className="w-full py-3 border border-[#E4E3E0] text-[#E4E3E0] font-bold uppercase tracking-widest text-xs hover:bg-[#E4E3E0] hover:text-[#141414] transition-all flex items-center justify-center gap-2"
-            >
-              <Upload className="w-4 h-4" />
-              Export Passport
-            </button>
+            
+            <div className="relative">
+              <button 
+                onClick={() => setShowExportMenu(!showExportMenu)}
+                disabled={isExporting}
+                className="w-full py-3 border border-[#E4E3E0] text-[#E4E3E0] font-bold uppercase tracking-widest text-xs hover:bg-[#E4E3E0] hover:text-[#141414] transition-all flex items-center justify-center gap-2"
+              >
+                {isExporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                Export Passport
+                <ChevronDown className={cn("w-4 h-4 transition-transform", showExportMenu && "rotate-180")} />
+              </button>
+
+              {showExportMenu && (
+                <div className="absolute bottom-full left-0 w-full mb-2 bg-white border border-[#141414] shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] z-50">
+                  <button 
+                    onClick={handleExportJSON}
+                    className="w-full p-4 text-[#141414] text-left text-xs font-bold uppercase tracking-widest hover:bg-[#141414] hover:text-[#E4E3E0] flex items-center gap-3 transition-colors"
+                  >
+                    <FileJson className="w-4 h-4" />
+                    Download JSON
+                  </button>
+                  <div className="h-[1px] bg-[#141414]/10" />
+                  <button 
+                    onClick={handleExportPDF}
+                    className="w-full p-4 text-[#141414] text-left text-xs font-bold uppercase tracking-widest hover:bg-[#141414] hover:text-[#E4E3E0] flex items-center gap-3 transition-colors"
+                  >
+                    <FileText className="w-4 h-4" />
+                    Download PDF (Visual)
+                  </button>
+                </div>
+              )}
+            </div>
           </section>
 
           {/* Tips */}
@@ -433,6 +594,189 @@ export default function App() {
           </div>
         </div>
       </main>
+
+      {/* Privacy Modal */}
+      {showPrivacyModal && (
+        <div className="fixed inset-0 bg-[#141414]/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <div className="bg-white border border-[#141414] max-w-md w-full p-8 space-y-6 shadow-[12px_12px_0px_0px_rgba(20,20,20,1)]">
+            <div className="flex justify-between items-center">
+              <h2 className="text-xl font-serif italic">Data Protection & Privacy</h2>
+              <button onClick={() => setShowPrivacyModal(false)} className="text-2xl">&times;</button>
+            </div>
+            <div className="space-y-4 text-sm leading-relaxed">
+              <p>In accordance with data protection regulations, you have full control over your digital footprint on CrediSense.</p>
+              
+              <div className="space-y-2">
+                <h3 className="font-bold uppercase text-[10px] tracking-widest">1. Data Portability</h3>
+                <p className="text-xs opacity-60">Download a complete machine-readable copy of all your historical data, including transactions and trust scores.</p>
+                <button 
+                  onClick={handleExportJSON}
+                  className="w-full py-2 border border-[#141414] text-[10px] font-bold uppercase tracking-widest hover:bg-[#141414] hover:text-[#E4E3E0] transition-all"
+                >
+                  Download My Data (JSON)
+                </button>
+              </div>
+
+              <div className="space-y-2 pt-4 border-t border-[#141414]/10">
+                <h3 className="font-bold uppercase text-[10px] tracking-widest text-red-600">2. Right to Erasure</h3>
+                <p className="text-xs opacity-60">Permanently delete your account and all associated data from our servers. This action is irreversible.</p>
+                <div className="p-4 bg-red-50 border border-red-100 space-y-4">
+                  <p className="text-[10px] text-red-800 italic">"I understand that this will delete all my Mobile Money logs, utility history, and my Trust Score permanently."</p>
+                  {!showConfirmDelete ? (
+                    <button 
+                      onClick={() => setShowConfirmDelete(true)}
+                      className="w-full py-2 bg-red-600 text-white text-[10px] font-bold uppercase tracking-widest hover:bg-red-700 transition-all"
+                    >
+                      Delete Everything
+                    </button>
+                  ) : (
+                    <div className="space-y-4">
+                      <p className="text-xs font-bold text-red-600">Are you absolutely sure? This is irreversible.</p>
+                      <div className="flex gap-2">
+                        <button 
+                          onClick={handleDeleteAllData}
+                          className="flex-1 py-2 bg-red-600 text-white text-[10px] font-bold uppercase tracking-widest hover:bg-red-700"
+                        >
+                          Yes, Delete
+                        </button>
+                        <button 
+                          onClick={() => setShowConfirmDelete(false)}
+                          className="flex-1 py-2 border border-[#141414] text-[10px] font-bold uppercase tracking-widest"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+            <button 
+              onClick={() => setShowPrivacyModal(false)}
+              className="w-full py-3 bg-[#141414] text-[#E4E3E0] text-[10px] font-bold uppercase tracking-widest"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Hidden Passport Template for PDF Export */}
+      <div 
+        ref={passportRef} 
+        style={{ display: 'none', width: '800px', backgroundColor: '#E4E3E0', color: '#141414' }} 
+        className="p-12 font-sans"
+      >
+        <div className="border-4 border-[#141414] p-12 bg-white space-y-12">
+          {/* Passport Header */}
+          <div className="flex justify-between items-start border-b-2 border-[#141414] pb-8">
+            <div className="space-y-2">
+              <h1 className="text-6xl font-serif italic tracking-tighter">CrediSense</h1>
+              <p className="text-sm uppercase tracking-widest" style={{ color: 'rgba(20, 20, 20, 0.6)' }}>Official Credit Passport</p>
+            </div>
+            <div className="text-right space-y-1">
+              <p className="text-[10px] font-mono uppercase" style={{ color: 'rgba(20, 20, 20, 0.4)' }}>Verification ID</p>
+              <p className="text-lg font-bold font-mono">#{Math.random().toString(36).substring(7).toUpperCase()}</p>
+              <p className="text-[10px] font-mono uppercase" style={{ color: 'rgba(20, 20, 20, 0.4)' }}>Issued On</p>
+              <p className="text-xs font-bold">{format(new Date(), 'dd MMMM yyyy')}</p>
+            </div>
+          </div>
+
+          {/* User Info */}
+          <div className="grid grid-cols-2 gap-12">
+            <div className="space-y-6">
+              <h3 className="text-xs font-mono uppercase tracking-widest pb-2" style={{ color: 'rgba(20, 20, 20, 0.4)', borderBottom: '1px solid rgba(20, 20, 20, 0.1)' }}>Holder Information</h3>
+              <div className="space-y-4">
+                <div>
+                  <p className="text-[10px] font-mono uppercase" style={{ color: 'rgba(20, 20, 20, 0.4)' }}>Full Name</p>
+                  <p className="text-xl font-bold">{profile?.displayName}</p>
+                </div>
+                <div>
+                  <p className="text-[10px] font-mono uppercase" style={{ color: 'rgba(20, 20, 20, 0.4)' }}>Business Sector</p>
+                  <p className="text-lg font-bold">{profile?.businessType || 'General Trade'}</p>
+                </div>
+                <div>
+                  <p className="text-[10px] font-mono uppercase" style={{ color: 'rgba(20, 20, 20, 0.4)' }}>Location</p>
+                  <p className="text-lg font-bold">{profile?.location || 'East Africa'}</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-6">
+              <h3 className="text-xs font-mono uppercase tracking-widest pb-2" style={{ color: 'rgba(20, 20, 20, 0.4)', borderBottom: '1px solid rgba(20, 20, 20, 0.1)' }}>Trust Analysis</h3>
+              <div className="flex items-baseline gap-4">
+                <span className="text-8xl font-mono font-bold tracking-tighter">{score?.score || 300}</span>
+                <span className="text-xl font-mono" style={{ color: 'rgba(20, 20, 20, 0.3)' }}>/ 850</span>
+              </div>
+              <div className="p-4 bg-[#141414] text-[#E4E3E0] text-xs font-bold uppercase tracking-widest text-center">
+                {score?.score && score.score > 600 ? 'Verified High Trust' : 'Emerging Trust Profile'}
+              </div>
+            </div>
+          </div>
+
+          {/* Radar Visualization Placeholder (CSS based) */}
+          <div className="grid grid-cols-4 gap-4 py-8 border-y" style={{ borderColor: 'rgba(20, 20, 20, 0.1)' }}>
+            {[
+              { label: 'Velocity', val: score?.velocityScore },
+              { label: 'Consistency', val: score?.consistencyScore },
+              { label: 'Resilience', val: score?.resilienceScore },
+              { label: 'Social Proof', val: score?.socialProofScore },
+            ].map((m, i) => (
+              <div key={i} className="text-center space-y-2">
+                <p className="text-[10px] font-mono uppercase" style={{ color: 'rgba(20, 20, 20, 0.4)' }}>{m.label}</p>
+                <div className="h-2 rounded-full overflow-hidden" style={{ backgroundColor: 'rgba(20, 20, 20, 0.1)' }}>
+                  <div className="h-full bg-[#141414]" style={{ width: `${m.val}%` }} />
+                </div>
+                <p className="text-xs font-bold font-mono">{Math.round(m.val || 0)}%</p>
+              </div>
+            ))}
+          </div>
+
+          {/* Insights */}
+          <div className="space-y-4">
+            <h3 className="text-xs font-mono uppercase tracking-widest" style={{ color: 'rgba(20, 20, 20, 0.4)' }}>AI Auditor Insights</h3>
+            <p className="text-lg font-serif italic leading-relaxed border-l-4 border-[#141414] pl-6 py-2">
+              "{score?.insights}"
+            </p>
+          </div>
+
+          {/* Recent Ledger */}
+          <div className="space-y-4">
+            <h3 className="text-xs font-mono uppercase tracking-widest" style={{ color: 'rgba(20, 20, 20, 0.4)' }}>Recent Verified Ledger</h3>
+            <table className="w-full text-left border-collapse font-mono text-[10px]">
+              <thead>
+                <tr className="border-b border-[#141414]" style={{ backgroundColor: 'rgba(20, 20, 20, 0.05)' }}>
+                  <th className="p-2 uppercase" style={{ color: 'rgba(20, 20, 20, 0.4)' }}>Date</th>
+                  <th className="p-2 uppercase" style={{ color: 'rgba(20, 20, 20, 0.4)' }}>Category</th>
+                  <th className="p-2 uppercase" style={{ color: 'rgba(20, 20, 20, 0.4)' }}>Type</th>
+                  <th className="p-2 uppercase text-right" style={{ color: 'rgba(20, 20, 20, 0.4)' }}>Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {transactions.slice(0, 5).map((t, i) => (
+                  <tr key={i} style={{ borderBottom: '1px solid rgba(20, 20, 20, 0.05)' }}>
+                    <td className="p-2">{format(new Date(t.date), 'dd MMM yyyy')}</td>
+                    <td className="p-2 uppercase">{t.category}</td>
+                    <td className="p-2 font-bold">{t.type}</td>
+                    <td className="p-2 text-right font-bold">UGX {t.amount.toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Footer */}
+          <div className="pt-12 flex justify-between items-end" style={{ color: 'rgba(20, 20, 20, 0.4)' }}>
+            <div className="space-y-1">
+              <p className="text-[8px] font-mono uppercase">Generated by CrediSense AI Engine</p>
+              <p className="text-[8px] font-mono uppercase">Kampala • Nairobi • Kigali</p>
+            </div>
+            <div className="text-right">
+              <ShieldCheck className="w-12 h-12" />
+            </div>
+          </div>
+        </div>
+      </div>
 
       {/* Footer */}
       <footer className="mt-12 border-t border-[#141414] p-8 text-center space-y-4">
