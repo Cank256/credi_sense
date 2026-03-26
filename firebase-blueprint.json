@@ -1,0 +1,63 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "User Profile",
+      "description": "Stores user basic information and credit status.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "displayName": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "phoneNumber": { "type": "string" },
+        "businessType": { "type": "string", "enum": ["Retail", "Service", "Agriculture", "Other"] },
+        "location": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email"]
+    },
+    "CreditScore": {
+      "title": "Credit Score",
+      "description": "The calculated Trust Score and breakdown.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "score": { "type": "integer" },
+        "velocityScore": { "type": "number" },
+        "consistencyScore": { "type": "number" },
+        "resilienceScore": { "type": "number" },
+        "socialProofScore": { "type": "number" },
+        "lastCalculated": { "type": "string", "format": "date-time" },
+        "insights": { "type": "string" }
+      },
+      "required": ["uid", "score"]
+    },
+    "Transaction": {
+      "title": "Mobile Money Transaction",
+      "description": "Individual MoMo or trade ledger entry.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "amount": { "type": "number" },
+        "type": { "type": "string", "enum": ["IN", "OUT"] },
+        "category": { "type": "string", "enum": ["MoMo", "Trade", "Utility", "Other"] },
+        "date": { "type": "string", "format": "date-time" },
+        "description": { "type": "string" }
+      },
+      "required": ["uid", "amount", "type", "date"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": "UserProfile",
+      "description": "User profile documents."
+    },
+    "/scores/{uid}": {
+      "schema": "CreditScore",
+      "description": "Credit scores indexed by user UID."
+    },
+    "/transactions/{transactionId}": {
+      "schema": "Transaction",
+      "description": "Collection of all transactions for scoring."
+    }
+  }
+}

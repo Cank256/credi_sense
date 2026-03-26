@@ -1,0 +1,123 @@
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// Collection: users
+// Document ID: {uid}
+// Fields:
+//   - uid: string (required) - Firebase Auth UID
+//   - displayName: string (optional)
+//   - email: string (required, email format)
+//   - phoneNumber: string (optional)
+//   - businessType: string (optional, enum: Retail, Service, Agriculture, Other)
+//   - location: string (optional)
+//   - createdAt: string (optional, date-time format)
+//
+// Collection: scores
+// Document ID: {uid}
+// Fields:
+//   - uid: string (required)
+//   - score: number (required, 300-850)
+//   - velocityScore: number (optional)
+//   - consistencyScore: number (optional)
+//   - resilienceScore: number (optional)
+//   - socialProofScore: number (optional)
+//   - lastCalculated: string (optional, date-time format)
+//   - insights: string (optional)
+//
+// Collection: transactions
+// Document ID: {transactionId}
+// Fields:
+//   - uid: string (required) - Owner of the transaction
+//   - amount: number (required, positive)
+//   - type: string (required, enum: IN, OUT)
+//   - category: string (required, enum: MoMo, Trade, Utility, Other)
+//   - date: string (required, date-time format)
+//   - description: string (optional)
+//
+// ===============================================================
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+          (request.auth.token.email == "nkunzecaleb@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidDateString(dateStr) {
+      return dateStr is string && dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*Z?$");
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email']) &&
+        data.uid == request.auth.uid &&
+        isValidEmail(data.email) &&
+        (!('displayName' in data) || (data.displayName is string && data.displayName.size() < 100)) &&
+        (!('businessType' in data) || data.businessType in ['Retail', 'Service', 'Agriculture', 'Other']);
+    }
+
+    function isValidScore(data) {
+      return data.keys().hasAll(['uid', 'score']) &&
+        data.uid is string &&
+        data.score is number && data.score >= 300 && data.score <= 850;
+    }
+
+    function isValidTransaction(data) {
+      return data.keys().hasAll(['uid', 'amount', 'type', 'category', 'date']) &&
+        data.uid == request.auth.uid &&
+        data.amount is number && data.amount > 0 &&
+        data.type in ['IN', 'OUT'] &&
+        data.category in ['MoMo', 'Trade', 'Utility', 'Other'] &&
+        isValidDateString(data.date);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId) && isValidUser(request.resource.data);
+      allow update: if isOwner(userId) && isValidUser(request.resource.data) &&
+        request.resource.data.uid == resource.data.uid;
+    }
+
+    match /scores/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      // Only system/admin should ideally write scores, but for prototype we allow user if valid
+      allow write: if isOwner(userId) && isValidScore(request.resource.data);
+    }
+
+    match /transactions/{transactionId} {
+      allow read: if isAuthenticated() && (resource.data.uid == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() && isValidTransaction(request.resource.data);
+      allow update: if isAuthenticated() && resource.data.uid == request.auth.uid &&
+        isValidTransaction(request.resource.data) &&
+        request.resource.data.uid == resource.data.uid;
+      allow delete: if isAuthenticated() && resource.data.uid == request.auth.uid;
+    }
+  }
+}
